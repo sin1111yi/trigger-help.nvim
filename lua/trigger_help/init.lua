@@ -1,4 +1,4 @@
--- lua/trigger_help/init.lua — trigger-help.nvim
+-- lua/trigger_help/init.lua — trigger-help.nvim entry point
 -- Command-triggered help panel.
 --   :TriggerHelp            toggle: close the open panel, or open the
 --                           snacks picker to browse docs
@@ -7,411 +7,53 @@
 -- filename > help tag. Content comes from markdown files, built-in :h
 -- tags, or docs registered via register_doc() (other plugins); the
 -- plugin ships no content of its own.
+--
+-- Modules: config (defaults), lang (locale), source (doc sources +
+-- resolution + selector items), panel (window/buffer lifecycle + render),
+-- picker (snacks selector). This file only wires setup + the command.
+
+local config = require('trigger_help.config')
+local source = require('trigger_help.source')
+local panel = require('trigger_help.panel')
+local picker = require('trigger_help.picker')
 
 local M = {}
-
-local defaults = {
-  content = {},        -- name -> md file path (string)
-  height = 40,         -- panel height, percent of window height
-  position = 'bottom', -- 'bottom' | 'top'
-}
-
-local cfg = {}
-local state = { win = nil, buf = nil, warned = {} }
-local help_cache = nil -- lazy help-tag scan cache; nil until first use
-local registered = {}   -- id -> doc spec (register_doc); same id overwrites
-
-local ns = vim.api.nvim_create_namespace('trigger_help')
-
--- Locale: zh* -> Chinese (same rule as wokamark help: LC_ALL > LC_MESSAGES > LANG)
-local function is_zh()
-  local lang = (vim.env.LC_ALL or vim.env.LC_MESSAGES or vim.env.LANG or ''):lower()
-  return lang:match('^zh') ~= nil
-end
-
--- Pick the language-appropriate value: { en = ..., zh = ... } tables are
--- selected by locale; plain values (string / list / function) pass through.
-local function pick_lang(v)
-  if type(v) ~= 'table' then return v end
-  local zh = is_zh()
-  if zh and v.zh ~= nil then return v.zh end
-  if not zh and v.en ~= nil then return v.en end
-  return v.en or v.zh -- fallback to whichever language exists
-end
-
--- Close the panel and delete its buffer (W2: no accumulation).
--- Idempotent: no window -> no-op.
-function M.close()
-  if state.win and vim.api.nvim_win_is_valid(state.win) then
-    pcall(vim.api.nvim_win_close, state.win, true)
-  end
-  if state.buf and vim.api.nvim_buf_is_valid(state.buf) and vim.api.nvim_buf_is_loaded(state.buf) then
-    pcall(vim.api.nvim_buf_delete, state.buf, { force = true })
-  end
-  state.win = nil
-  state.buf = nil
-end
-
--- Load an md file: `#`/`##` heading lines get Title highlight,
--- lines starting with `-` are indented 2 spaces, everything else as-is.
--- Missing file -> WARN once per path (state.warned), returns nil.
-local function load_md(path)
-  local full = vim.fn.expand(path)
-  if vim.fn.filereadable(full) ~= 1 then
-    if not state.warned[full] then
-      state.warned[full] = true
-      vim.notify('[trigger-help] md file not found: ' .. full, vim.log.levels.WARN)
-    end
-    return nil
-  end
-  local ok, lines = pcall(vim.fn.readfile, full)
-  if not ok or type(lines) ~= 'table' then return nil end
-  local out, titles = {}, {}
-  for i, line in ipairs(lines) do
-    if line:match('^#+') then
-      out[i] = line
-      titles[#titles + 1] = i - 1
-    elseif line:match('^%-') then
-      out[i] = line:gsub('^%-%s?', '  ')
-    else
-      out[i] = line
-    end
-  end
-  return out, nil, titles
-end
-
--- ── register_doc API ────────────────────────────────────────────────
--- Other plugins register docs with trigger-help, e.g. wokamark's
--- command cheatsheet. Content source is the first non-nil of
--- text > file > fn. Same id re-registered = overwrite (one entry).
--- Registered docs show in the picker as `[id] name` and resolve via
--- :TriggerHelp <name> (name, or id when the name contains spaces).
--- Does not depend on setup(); may be called before it.
-function M.register_doc(spec)
-  if type(spec) ~= 'table' then
-    vim.notify('[trigger-help] register_doc: expected a table', vim.log.levels.WARN)
-    return M
-  end
-  if type(spec.id) ~= 'string' or spec.id == '' then
-    vim.notify('[trigger-help] register_doc: id (string) required', vim.log.levels.WARN)
-    return M
-  end
-  if type(spec.name) ~= 'string' and (type(spec.name) ~= 'table' or (spec.name.en == nil and spec.name.zh == nil)) then
-    vim.notify('[trigger-help] register_doc: name required for id "' .. spec.id .. '"', vim.log.levels.WARN)
-    return M
-  end
-  local kind, value
-  if spec.text ~= nil then
-    if type(spec.text) ~= 'table' then
-      vim.notify('[trigger-help] register_doc: text must be a list of lines for id "' .. spec.id .. '"', vim.log.levels.WARN)
-      return M
-    end
-    kind, value = 'text', spec.text
-  elseif spec.file ~= nil then
-    if type(spec.file) ~= 'string' then
-      vim.notify('[trigger-help] register_doc: file must be a path string for id "' .. spec.id .. '"', vim.log.levels.WARN)
-      return M
-    end
-    kind, value = 'file', spec.file
-  elseif spec.fn ~= nil then
-    if type(spec.fn) ~= 'function' then
-      vim.notify('[trigger-help] register_doc: fn must be a function for id "' .. spec.id .. '"', vim.log.levels.WARN)
-      return M
-    end
-    kind, value = 'fn', spec.fn
-  else
-    vim.notify('[trigger-help] register_doc: no content (text/file/fn) for id "' .. spec.id .. '"', vim.log.levels.WARN)
-    return M
-  end
-  registered[spec.id] = { id = spec.id, name = spec.name, kind = kind, value = value }
-  return M
-end
-
--- Resolve a registered doc to panel lines (+ft, +titles for md files).
--- Values may be { en = ..., zh = ... } — pick by locale first.
-local function doc_lines(doc)
-  local value = pick_lang(doc.value)
-  local name = pick_lang(doc.name)
-  if doc.kind == 'text' then
-    if type(value) ~= 'table' then
-      vim.notify('[trigger-help] register_doc text must be a table for "' .. name .. '"', vim.log.levels.WARN)
-      return nil
-    end
-    return value
-  elseif doc.kind == 'file' then
-    return load_md(value) -- missing file already WARNs once per path
-  else -- 'fn'
-    local ok, lines = pcall(value)
-    if not ok or type(lines) ~= 'table' then
-      vim.notify('[trigger-help] register_doc fn failed for "' .. name .. '"', vim.log.levels.WARN)
-      return nil
-    end
-    return lines
-  end
-end
-
--- Load a built-in help tag: silent :help <tag>, read the section around
--- the tag line, close the help window, return lines + 'help' filetype.
--- W1: only windows this call opened (set difference) are closed; a reused
--- user help window is left untouched. W2: opened windows' buffers deleted.
-local function load_help(tag)
-  local prev_win = vim.api.nvim_get_current_win()
-  local before = {}
-  for _, w in ipairs(vim.api.nvim_list_wins()) do before[w] = true end
-  pcall(vim.cmd, 'silent! help ' .. vim.fn.fnameescape(tag))
-  local win = vim.api.nvim_get_current_win()
-  local buf = vim.api.nvim_win_get_buf(win)
-  local new_wins = {}
-  for _, w in ipairs(vim.api.nvim_list_wins()) do
-    if not before[w] then new_wins[#new_wins + 1] = w end
-  end
-  if vim.bo[buf].filetype ~= 'help' then
-    -- tag not found: nothing was opened
-    for _, w in ipairs(new_wins) do pcall(vim.api.nvim_win_close, w, true) end
-    pcall(vim.api.nvim_set_current_win, prev_win)
-    return nil
-  end
-  local cursor = vim.api.nvim_win_get_cursor(win)
-  local all = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-  local out = {}
-  -- Tag line + following body, up to the next section header.
-  for i = cursor[1], #all do
-    local line = all[i]
-    if i > cursor[1] and line ~= '' and not line:match('^[\t ]') and not line:match('^=+$') then
-      break
-    end
-    out[#out + 1] = line
-    if #out >= 120 then break end -- defensive cap
-  end
-  -- Close only windows this call opened, and delete their buffers (W2);
-  -- a reused user help window/buffer is left untouched (W1).
-  for _, w in ipairs(new_wins) do
-    local wb = vim.api.nvim_win_get_buf(w)
-    pcall(vim.api.nvim_win_close, w, true)
-    if vim.api.nvim_buf_is_valid(wb) and vim.api.nvim_buf_is_loaded(wb) then
-      pcall(vim.api.nvim_buf_delete, wb, { force = true })
-    end
-  end
-  pcall(vim.api.nvim_set_current_win, prev_win)
-  return out, 'help'
-end
-
--- Lazy scan of built-in help tags; cached for the session (module var,
--- scanned at most once). Note: getcompletion('', 'help') only returns the
--- help-related subset (empty-pattern quirk in Vim), so iterate prefixes
--- (a-z/A-Z, digits, leading punctuation) to cover all tags. Uppercase A-Z
--- prefixes are required: real tags include E128, VimL function tags, etc.
--- and getcompletion prefix-matches case-sensitively, so lowercase-only
--- prefixes would miss them (dedup merges both spellings, e.g. 'e' and 'E'
--- sets overlap).
-local function help_tags()
-  if help_cache == nil then
-    local seen, out = {}, {}
-    local prefixes = { '0','1','2','3','4','5','6','7','8','9',
-      'a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p','q','r','s','t','u','v','w','x','y','z',
-      'A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z',
-      "'", '-', ':', '[', ']', '!', '@', '#', '*', '_', '<', '>', '~' }
-    for _, p in ipairs(prefixes) do
-      local ok, tags = pcall(vim.fn.getcompletion, p, 'help')
-      if ok and type(tags) == 'table' then
-        for _, t in ipairs(tags) do
-          if not seen[t] then
-            seen[t] = true
-            out[#out + 1] = t
-          end
-        end
-      end
-    end
-    help_cache = out
-  end
-  return help_cache
-end
-
--- Resolve a name to a doc entry: content key > registered doc name (or
--- id) > md filename > help tag. Returns { kind = 'md', path = ..., name = ... },
---         { kind = 'doc', id = ..., name = ... },
---         { kind = 'help', tag = ... } or nil.
-local function resolve(name)
-  if name == nil or name == '' then return nil end
-  if cfg.content[name] ~= nil then
-    return { kind = 'md', path = cfg.content[name], name = name }
-  end
-  -- registered docs: match displayed name (locale-picked), then id
-  -- (id lets :TriggerHelp wokamark open a doc whose display name has
-  -- spaces, e.g. 'wokamark 使用')
-  for _, doc in pairs(registered) do
-    if pick_lang(doc.name) == name or doc.id == name then
-      return { kind = 'doc', id = doc.id, name = pick_lang(doc.name) }
-    end
-  end
-  for key, path in pairs(cfg.content) do
-    local base = vim.fn.fnamemodify(vim.fn.expand(path), ':t:r')
-    if base == name then return { kind = 'md', path = path, name = key } end
-  end
-  -- help tag: exact query bypasses the 300-per-prefix cache cap, so
-  -- :TriggerHelp E900 works even though E900 is not in the picker list
-  local exact = vim.fn.getcompletion(name, 'help')
-  if #exact > 0 and vim.tbl_contains(exact, name) then
-    return { kind = 'help', tag = name }
-  end
-  return nil
-end
-
--- Render lines into the bottom/top split panel (not focused). Regular
--- window -> mouse wheel / scrolling work natively. `q` closes the panel.
-local function render(lines, ft, titles)
-  M.close()
-  local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  if ft then vim.bo[buf].filetype = ft end
-  for _, ln in ipairs(titles or {}) do
-    vim.api.nvim_buf_set_extmark(buf, ns, ln, 0, {
-      hl_group = 'Title',
-      end_col = #lines[ln + 1],
-    })
-  end
-  vim.bo[buf].modifiable = false
-  -- No custom q/Esc bindings: the panel behaves like any normal buffer
-  -- (:q, <C-w>c, or re-running :TriggerHelp closes it). This keeps q
-  -- free for its ordinary meaning and matches the rest of the UI.
-  vim.bo[buf].bufhidden = 'wipe' -- closing the window (e.g. :q) wipes the
-  -- scratch buffer so it cannot accumulate across a session (W2)
-  state.buf = buf
-  local height = math.max(3, math.floor(vim.o.lines * cfg.height / 100))
-  -- Panel takes focus (cursor lands in it) so the user can scroll right
-  -- away; :q / <C-w>c / toggle closes it.
-  state.win = vim.api.nvim_open_win(buf, true, {
-    split = cfg.position == 'top' and 'above' or 'below',
-    height = height,
-  })
-end
-
--- Open the panel for a resolved doc entry.
-local function open(entry)
-  if entry.kind == 'md' then
-    local lines, ft, titles = load_md(entry.path)
-    if not lines then return end
-    render(lines, ft, titles)
-  elseif entry.kind == 'doc' then
-    local doc = registered[entry.id]
-    if not doc then return end
-    local lines, ft, titles = doc_lines(doc)
-    if not lines then return end
-    render(lines, ft, titles)
-  else
-    local lines, ft = load_help(entry.tag)
-    if not lines then
-      vim.notify('[trigger-help] help tag not found: ' .. entry.tag, vim.log.levels.WARN)
-      return
-    end
-    render(lines, ft)
-  end
-end
-
--- Selector items: user content docs ([md] <name>) + registered docs
--- ([id] <name>) + built-in help tags ([help] <tag>). Exposed for tests;
--- also used by the picker.
-function M.picker_items()
-  local items = {}
-  for name, path in pairs(cfg.content) do
-    items[#items + 1] = {
-      kind = 'md',
-      name = name,
-      path = path,
-      text = '[md] ' .. name,
-    }
-  end
-  for _, doc in pairs(registered) do
-    local shown = pick_lang(doc.name)
-    items[#items + 1] = {
-      kind = 'doc',
-      id = doc.id,
-      name = shown,
-      text = '[' .. doc.id .. '] ' .. shown,
-    }
-  end
-  for _, tag in ipairs(help_tags()) do
-    items[#items + 1] = { kind = 'help', tag = tag, text = '[help] ' .. tag }
-  end
-  table.sort(items, function(a, b) return a.text < b.text end)
-  return items
-end
-
--- Open the snacks picker over the doc list.
-local function open_picker()
-  -- snacks.picker 内部引用全局 Snacks；先 require('snacks') 建立它，
-  -- 避免依赖用户环境的加载顺序（workmark 能跑是因为 snacks 已被其他插件加载）。
-  local ok_snacks = pcall(require, 'snacks')
-  if not ok_snacks then
-    vim.notify('[trigger-help] snacks.nvim required for picker', vim.log.levels.WARN)
-    return
-  end
-  local ok, snacks = pcall(require, 'snacks.picker')
-  if not ok then
-    vim.notify('[trigger-help] snacks.nvim required for picker', vim.log.levels.WARN)
-    return
-  end
-  local items = M.picker_items()
-  snacks.pick({
-    title = 'Trigger help',
-    items = items,
-    format = function(item)
-      local hl = item.kind == 'help' and 'Comment' or 'Special'
-      return { { item.text, hl } }
-    end,
-    preview = function(ctx)
-      local item = ctx.item
-      if item.kind == 'md' then
-        ctx.preview:set_title(item.name)
-        ctx.preview:set_lines(load_md(item.path) or { '(file not found)' })
-      elseif item.kind == 'doc' then
-        local doc = registered[item.id]
-        local lines = doc and doc_lines(doc) or nil
-        ctx.preview:set_title(item.name)
-        ctx.preview:set_lines(lines or { '(no content)' })
-      else
-        ctx.preview:set_title('help: ' .. item.tag)
-        ctx.preview:set_lines({ 'Built-in help tag: ' .. item.tag, '', 'Press <CR> to open.' })
-      end
-      return true
-    end,
-    confirm = function(picker, item)
-      picker:close()
-      open(item)
-    end,
-  })
-end
 
 -- :TriggerHelp [name]
 --   no args: panel open -> close (toggle); else open the picker.
 --   name:    resolve (content key > md filename > help tag) and open.
 local function trigger_help(name)
   if name == nil or name == '' then
-    if state.win and vim.api.nvim_win_is_valid(state.win) then
-      M.close()
+    if panel.is_open() then
+      panel.close()
       return
     end
-    open_picker()
+    picker.open()
     return
   end
-  local entry = resolve(name)
+  local entry = source.resolve(name)
   if entry == nil then
     vim.notify('[trigger-help] no doc named "' .. name .. '"', vim.log.levels.WARN)
     return
   end
-  open(entry)
+  panel.open(entry)
 end
 
 function M.setup(opts)
   -- Idempotency guard: a second setup (double source of the config file,
   -- repeated require) must not register the user command again.
   if vim.g.trigger_help_loaded then return M end
-  cfg = vim.tbl_extend('keep', opts or {}, defaults)
+  config.cfg = vim.tbl_extend('keep', opts or {}, config.defaults)
   vim.g.trigger_help_loaded = true
   vim.api.nvim_create_user_command('TriggerHelp', function(args)
     trigger_help(args.fargs[1])
   end, { nargs = '?', desc = 'Toggle trigger-help panel, or open the picker' })
   return M
 end
+
+-- Public API (used by tests and other plugins):
+M.close = panel.close
+M.register_doc = source.register_doc
+M.picker_items = source.picker_items
 
 return M
