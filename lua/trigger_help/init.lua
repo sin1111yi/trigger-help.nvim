@@ -47,7 +47,8 @@ local scroll_cb = nil
 
 remove_scroll = function()
   if scroll_cb then
-    scroll_cb()
+    -- vim.on_key returns a namespace id (number); pass nil to clear it
+    pcall(vim.on_key, nil, scroll_cb)
     scroll_cb = nil
   end
 end
