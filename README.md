@@ -1,12 +1,12 @@
 # trigger-help.nvim
 
-事件触发帮助浮动窗口：按下 `/`、`?`、`:` 等按键（或任意可配置事件）时，在屏幕右上角弹出对应帮助内容。内容来自 **markdown 文件**或 **内置 `:h` 文档**，插件本身不内置任何内容。
+事件触发帮助侧边面板：按下 `/`、`?`、`:` 等按键（或任意可配置事件）时，在右侧（或左侧）打开一个占窗口宽度 25% 的帮助面板。内容来自 **markdown 文件**或 **内置 `:h` 文档**，插件本身不内置任何内容。
 
 零依赖、单文件（`lua/trigger_help/init.lua`）、`setup()` 全参数可配。
 
 ## 安装
 
-放到 `pack/*/opt/trigger-help.nvim/`（独立本地插件，不受 vim.pack 管理），然后在配置中 `packadd` 并调用 setup：
+源码仓库在 `~/projects/trigger-help.nvim`（git），通过 vim.pack 本地路径安装（`plugins.lua` 里 `$NVIM_LOCAL_PLUGINS .. '/trigger-help.nvim'`，`vim.pack.update()` 克隆到 `pack/core/opt/`）。然后在配置中 `packadd` 并调用 setup：
 
 ```lua
 vim.cmd('packadd trigger-help.nvim')
@@ -49,11 +49,11 @@ require('trigger_help').setup({
 
 ```lua
 require('trigger_help').setup({
-  content = { [':'] = '~/.config/nvim/keyhelp/lua-notes.md' },
+  content = { [':'] = '~/.config/nvim/docs/trigger-help.nvim/lua-notes.md' },
   trigger = { event = 'BufEnter', pattern = '*.lua' },
   close = { 'BufLeave', 'FocusLost' },
   match = function() return ':' end,
-  pos = 'bottom-right',
+  side = 'left',
 })
 ```
 
