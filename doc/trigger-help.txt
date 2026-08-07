@@ -4,9 +4,10 @@
 INTRODUCTION                                    *trigger-help*
 
 命令触发的帮助面板插件。`:TriggerHelp` 打开 snacks picker 浏览文档（用户
-md 文件 + 内置 :h tag），或 `:TriggerHelp <名称>` 直接打开。面板为底部（或
-顶部）横向分屏，高度 40%（可配），不抢焦点。内容来自 markdown 文件或内置
-:h 文档，插件不内置任何内容。
+md 文件 + 其他插件注册的文档 + 内置 :h tag），或 `:TriggerHelp <名称>` 直接
+打开。面板为底部（或顶部）横向分屏，高度 40%（可配），不抢焦点。内容来自
+markdown 文件、内置 :h 文档或 register_doc() 注册的文档，插件不内置任何
+内容。
 
 安装：放到 pack/*/opt/trigger-help.nvim/，packadd 后调用 setup()。
 依赖：selector 需要 snacks.nvim（已装，workmark 在用）。
@@ -17,8 +18,8 @@ COMMAND                                              *trigger-help-command*
     :TriggerHelp                toggle：面板已开 → 关闭；未开 → snacks picker
     :TriggerHelp <名称>         直接打开指定文档（跳过 selector）
 
-名称解析顺序：content 键 → md 文件名 → help tag；都不中 → vim.notify WARN
-提示，不崩溃。
+名称解析顺序：content 键 → 注册文档 name（含 id 别名）→ md 文件名 →
+help tag；都不中 → vim.notify WARN 提示，不崩溃。
 
 ==============================================================================
 SETUP                                              *trigger-help-setup*
@@ -42,16 +43,36 @@ height    面板高度，窗口高度的百分比，默认 40。
 position  面板位置：'bottom' 或 'top'，默认 'bottom'。
 
 ==============================================================================
+REGISTER DOC                                        *trigger-help-register*
+
+其他插件可向 trigger-help 注册文档（如 wokamark 注册命令速查）。不依赖
+setup()，可在其之前调用：
+
+    local th = require('trigger_help')
+    th.register_doc({
+      id = 'wokamark',          " 来源标识（selector 前缀 [wokamark]）
+      name = 'wokamark 使用',    " 文档名（selector 显示 + :TriggerHelp <name> 直开）
+      text = { '...' },         " 内容：文本行数组
+      -- file = '/path/doc.md', " 内容：md 文件（三选一，text > file > fn）
+      -- fn = function() return { '...' } end,  " 内容：动态函数
+    })
+
+同 id 重复注册 = 覆盖（不重复条目）。注册文档进入 selector（`[id] <name>`
+前缀）与名称解析（:TriggerHelp <name> 直开；name 含空格时 id 也可直开）。
+
+==============================================================================
 BEHAVIOR                                            *trigger-help-behavior*
 
-selector：snacks.pick 列出两类条目——用户 content 文档（`[md] <name>` 前缀）
-与内置 help tag（`[help] <tag>` 前缀）。help tag 用 getcompletion 前缀遍历
-懒扫描（a-z、数字、前导标点；getcompletion('', 'help') 只返回 help 相关子集，
-前缀遍历才覆盖全部 tag），会话内只扫一次、内存缓存。选中 → 面板打开。
+selector：snacks.pick 列出三类条目——用户 content 文档（`[md] <name>` 前缀）、
+注册文档（`[id] <name>` 前缀）与内置 help tag（`[help] <tag>` 前缀）。help
+tag 用 getcompletion 前缀遍历懒扫描（a-z、数字、前导标点；getcompletion('',
+'help') 只返回 help 相关子集，前缀遍历才覆盖全部 tag），会话内只扫一次、
+内存缓存。选中 → 面板打开。
 
 面板：底部（或 position='top' 顶部）横向分屏普通 buffer，高度 = 窗口高度 ×
-height%。打开不抢焦点（enter=false）；普通窗口，鼠标滚轮/滚动天然支持。
-q（buffer 级 keymap）关闭面板并删除自建 buffer。
+height%。打开即聚焦（光标落入面板便于滚动）；普通窗口，鼠标滚轮/滚动天然
+支持。无自定义 q/Esc 绑定——:q、<C-w>c 或再次 :TriggerHelp 均可关闭，关闭
+即删除自建 buffer（bufhidden='wipe'）。
 
 md 渲染（极简）：行首 #/## 整行 Title 高亮；行首 - 替换为 2 空格缩进；
 其余原样，不解析行内 md。

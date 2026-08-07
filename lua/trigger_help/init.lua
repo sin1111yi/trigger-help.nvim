@@ -3,9 +3,10 @@
 --   :TriggerHelp            toggle: close the open panel, or open the
 --                           snacks picker to browse docs
 --   :TriggerHelp <name>     open that doc directly (skip the picker)
--- Name resolution (in order): content key > md filename > help tag.
--- Content comes from markdown files or built-in :h tags; the plugin
--- ships no content of its own.
+-- Name resolution (in order): content key > registered doc name > md
+-- filename > help tag. Content comes from markdown files, built-in :h
+-- tags, or docs registered via register_doc() (other plugins); the
+-- plugin ships no content of its own.
 
 local M = {}
 
@@ -18,6 +19,7 @@ local defaults = {
 local cfg = {}
 local state = { win = nil, buf = nil, warned = {} }
 local help_cache = nil -- lazy help-tag scan cache; nil until first use
+local registered = {}   -- id -> doc spec (register_doc); same id overwrites
 
 local ns = vim.api.nvim_create_namespace('trigger_help')
 
@@ -60,6 +62,61 @@ local function load_md(path)
     end
   end
   return out, nil, titles
+end
+
+-- ── register_doc API ────────────────────────────────────────────────
+-- Other plugins register docs with trigger-help, e.g. wokamark's
+-- command cheatsheet. Content source is the first non-nil of
+-- text > file > fn. Same id re-registered = overwrite (one entry).
+-- Registered docs show in the picker as `[id] name` and resolve via
+-- :TriggerHelp <name> (name, or id when the name contains spaces).
+-- Does not depend on setup(); may be called before it.
+function M.register_doc(spec)
+  if type(spec) ~= 'table' then
+    vim.notify('[trigger-help] register_doc: expected a table', vim.log.levels.WARN)
+    return M
+  end
+  if type(spec.id) ~= 'string' or spec.id == '' then
+    vim.notify('[trigger-help] register_doc: id (string) required', vim.log.levels.WARN)
+    return M
+  end
+  if type(spec.name) ~= 'string' or spec.name == '' then
+    vim.notify('[trigger-help] register_doc: name required for id "' .. spec.id .. '"', vim.log.levels.WARN)
+    return M
+  end
+  local kind, value
+  if spec.text ~= nil then
+    kind, value = 'text', spec.text
+  elseif spec.file ~= nil then
+    kind, value = 'file', spec.file
+  elseif spec.fn ~= nil then
+    kind, value = 'fn', spec.fn
+  else
+    vim.notify('[trigger-help] register_doc: no content (text/file/fn) for id "' .. spec.id .. '"', vim.log.levels.WARN)
+    return M
+  end
+  registered[spec.id] = { id = spec.id, name = spec.name, kind = kind, value = value }
+  return M
+end
+
+-- Resolve a registered doc to panel lines (+ft, +titles for md files).
+local function doc_lines(doc)
+  if doc.kind == 'text' then
+    if type(doc.value) ~= 'table' then
+      vim.notify('[trigger-help] register_doc text must be a table for "' .. doc.name .. '"', vim.log.levels.WARN)
+      return nil
+    end
+    return doc.value
+  elseif doc.kind == 'file' then
+    return load_md(doc.value) -- missing file already WARNs once per path
+  else -- 'fn'
+    local ok, lines = pcall(doc.value)
+    if not ok or type(lines) ~= 'table' then
+      vim.notify('[trigger-help] register_doc fn failed for "' .. doc.name .. '"', vim.log.levels.WARN)
+      return nil
+    end
+    return lines
+  end
 end
 
 -- Load a built-in help tag: silent :help <tag>, read the section around
@@ -139,13 +196,21 @@ local function help_tags()
   return help_cache
 end
 
--- Resolve a name to a doc entry: content key > md filename > help tag.
--- Returns { kind = 'md', path = ..., name = ... } or
+-- Resolve a name to a doc entry: content key > registered doc name (or
+-- id) > md filename > help tag. Returns { kind = 'md', path = ..., name = ... },
+--         { kind = 'doc', id = ..., name = ... },
 --         { kind = 'help', tag = ... } or nil.
 local function resolve(name)
   if name == nil or name == '' then return nil end
   if cfg.content[name] ~= nil then
     return { kind = 'md', path = cfg.content[name], name = name }
+  end
+  -- registered docs: match name, then id (id lets :TriggerHelp wokamark
+  -- open a doc whose display name contains spaces, e.g. 'wokamark 使用')
+  for _, doc in pairs(registered) do
+    if doc.name == name or doc.id == name then
+      return { kind = 'doc', id = doc.id, name = doc.name }
+    end
   end
   for key, path in pairs(cfg.content) do
     local base = vim.fn.fnamemodify(vim.fn.expand(path), ':t:r')
@@ -195,6 +260,12 @@ local function open(entry)
     local lines, ft, titles = load_md(entry.path)
     if not lines then return end
     render(lines, ft, titles)
+  elseif entry.kind == 'doc' then
+    local doc = registered[entry.id]
+    if not doc then return end
+    local lines, ft, titles = doc_lines(doc)
+    if not lines then return end
+    render(lines, ft, titles)
   else
     local lines, ft = load_help(entry.tag)
     if not lines then
@@ -205,8 +276,9 @@ local function open(entry)
   end
 end
 
--- Selector items: user content docs ([md] <name>) + built-in help tags
--- ([help] <tag>). Exposed for tests; also used by the picker.
+-- Selector items: user content docs ([md] <name>) + registered docs
+-- ([id] <name>) + built-in help tags ([help] <tag>). Exposed for tests;
+-- also used by the picker.
 function M.picker_items()
   local items = {}
   for name, path in pairs(cfg.content) do
@@ -215,6 +287,14 @@ function M.picker_items()
       name = name,
       path = path,
       text = '[md] ' .. name,
+    }
+  end
+  for _, doc in pairs(registered) do
+    items[#items + 1] = {
+      kind = 'doc',
+      id = doc.id,
+      name = doc.name,
+      text = '[' .. doc.id .. '] ' .. doc.name,
     }
   end
   for _, tag in ipairs(help_tags()) do
@@ -243,7 +323,7 @@ local function open_picker()
     title = 'Trigger help',
     items = items,
     format = function(item)
-      local hl = item.kind == 'md' and 'Special' or 'Comment'
+      local hl = item.kind == 'help' and 'Comment' or 'Special'
       return { { item.text, hl } }
     end,
     preview = function(ctx)
@@ -251,6 +331,11 @@ local function open_picker()
       if item.kind == 'md' then
         ctx.preview:set_title(item.name)
         ctx.preview:set_lines(load_md(item.path) or { '(file not found)' })
+      elseif item.kind == 'doc' then
+        local doc = registered[item.id]
+        local lines = doc and doc_lines(doc) or nil
+        ctx.preview:set_title(item.name)
+        ctx.preview:set_lines(lines or { '(no content)' })
       else
         ctx.preview:set_title('help: ' .. item.tag)
         ctx.preview:set_lines({ 'Built-in help tag: ' .. item.tag, '', 'Press <CR> to open.' })
