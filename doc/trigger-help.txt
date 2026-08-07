@@ -1,13 +1,24 @@
-*trigger-help.txt*  事件触发帮助侧边面板（md / :h 内容）
+*trigger-help.txt*   命令触发的帮助面板（md / :h 内容，snacks picker 浏览）
 
 ==============================================================================
 INTRODUCTION                                    *trigger-help*
 
-事件触发帮助侧边面板插件。按下 / ? : 等按键（或任意可配置事件）时在屏幕
-右上角弹出对应帮助内容。内容来自 markdown 文件或内置 :h 文档，插件不内置
-任何内容。零依赖、单文件、setup() 全参数可配。
+命令触发的帮助面板插件。`:TriggerHelp` 打开 snacks picker 浏览文档（用户
+md 文件 + 内置 :h tag），或 `:TriggerHelp <名称>` 直接打开。面板为底部（或
+顶部）横向分屏，高度 40%（可配），不抢焦点。内容来自 markdown 文件或内置
+:h 文档，插件不内置任何内容。
 
 安装：放到 pack/*/opt/trigger-help.nvim/，packadd 后调用 setup()。
+依赖：selector 需要 snacks.nvim（已装，workmark 在用）。
+
+==============================================================================
+COMMAND                                              *trigger-help-command*
+
+    :TriggerHelp                toggle：面板已开 → 关闭；未开 → snacks picker
+    :TriggerHelp <名称>         直接打开指定文档（跳过 selector）
+
+名称解析顺序：content 键 → md 文件名 → help tag；都不中 → vim.notify WARN
+提示，不崩溃。
 
 ==============================================================================
 SETUP                                              *trigger-help-setup*
@@ -15,44 +26,47 @@ SETUP                                              *trigger-help-setup*
     vim.cmd('packadd trigger-help.nvim')
     require('trigger_help').setup({
       content = {
-        ['/'] = '~/.config/nvim/docs/trigger-help.nvim/search.md', " md 文件路径
-        ['?'] = { help = 'search' },                  " 内置 :h 文档形态
-        [':'] = '~/.config/nvim/docs/trigger-help.nvim/cmd.md',
+        search  = '~/.config/nvim/docs/trigger-help.nvim/search.md',
+        reverse = '~/.config/nvim/docs/trigger-help.nvim/reverse.md',
+        cmd     = '~/.config/nvim/docs/trigger-help.nvim/cmd.md',
       },
-      trigger = 'CmdlineEnter',    " 或 { event='BufEnter', pattern='*.lua' }
-      close = 'CmdlineLeave',      " 或数组（多个关闭事件）
-      match = function() return vim.fn.getcmdtype() end,  " 返回 content 键
-      width = 25,                  " 侧边面板宽度（窗口列数百分比）
-      side = 'right',              " 'left' | 'right'
+      height = 40,         " 面板高度（窗口高度百分比）
+      position = 'bottom', " 'bottom' | 'top'
     })
 
 配置项：~
 
-content  内容表：键 → md 文件路径（string）或 { help = '<tag>' }。
-         空表/未设 = 零行为（不注册任何 autocmd）。
-trigger  触发事件。string 或 { event = ..., pattern = ... }。
-close    关闭事件。string 或数组，任一触发即幂等关闭。
-match    触发后调用，返回 content 键；nil/'' 不显示。
-         默认：trigger 含 CmdlineEnter 时自动用 v:event.cmdtype
-         （回退 getcmdtype()），其他事件无默认（不显示）。
-width    侧边面板宽度，窗口列数的百分比，默认 25。
-side     侧边方向：'left' 或 'right'，默认 'right'。
+content   文档表：键 = 文档名（selector 显示名）→ md 文件路径（string）。
+          空表 = 无内容（picker 只列 help tag）。
+height    面板高度，窗口高度的百分比，默认 40。
+position  面板位置：'bottom' 或 'top'，默认 'bottom'。
 
 ==============================================================================
 BEHAVIOR                                            *trigger-help-behavior*
 
+selector：snacks.pick 列出两类条目——用户 content 文档（`[md] <name>` 前缀）
+与内置 help tag（`[help] <tag>` 前缀）。help tag 用 getcompletion 前缀遍历
+懒扫描（a-z、数字、前导标点；getcompletion('', 'help') 只返回 help 相关子集，
+前缀遍历才覆盖全部 tag），会话内只扫一次、内存缓存。选中 → 面板打开。
+
+面板：底部（或 position='top' 顶部）横向分屏普通 buffer，高度 = 窗口高度 ×
+height%。打开不抢焦点（enter=false）；普通窗口，鼠标滚轮/滚动天然支持。
+q（buffer 级 keymap）关闭面板并删除自建 buffer。
+
 md 渲染（极简）：行首 #/## 整行 Title 高亮；行首 - 替换为 2 空格缩进；
 其余原样，不解析行内 md。
 
-:h 形态：静默执行 :help <tag>（pcall 包裹）→ 读取该 tag 所在小节 → 关闭
-help 窗口 → 渲染到侧边面板，保留 filetype='help' 获得内置高亮。
+:h 形态：静默执行 :help <tag>（pcall 包裹）→ 读取该 tag 所在小节 → 渲染到
+面板，保留 filetype='help' 获得内置高亮 → 只关闭本调用新增的 help 窗口
+（复用用户已有 help 窗口时不动它），并删除新增窗口的 buffer。
 
 异常路径：
 - md 文件缺失：vim.notify WARN 一次（每路径每会话），不显示不崩溃。
-- match 返回键不在 content：静默。
-- 同一时刻只保留一个侧边面板；关闭幂等，重复触发不报错。
-- setup() 幂等：vim.g.trigger_help_loaded 守卫，重复调用不重复注册
+- 未知名称：vim.notify WARN 提示，不崩溃。
+- 同一时刻只保留一个面板；关闭幂等，重复触发不报错。
+- setup() 幂等：vim.g.trigger_help_loaded 守卫，重复调用不重复注册命令
   （opt 插件双 source 场景）。
+- 不内置 keymap：用户自行绑定，如 <leader>xh → :TriggerHelp<CR>。
 
 ==============================================================================
  vim:tw=78:ts=8:noet:ft=help:norl:

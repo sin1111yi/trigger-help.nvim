@@ -1,8 +1,8 @@
 # trigger-help.nvim
 
-事件触发帮助侧边面板：按下 `/`、`?`、`:` 等按键（或任意可配置事件）时，在右侧（或左侧）打开一个占窗口宽度 25% 的帮助面板。内容来自 **markdown 文件**或 **内置 `:h` 文档**，插件本身不内置任何内容。
+命令触发的帮助面板：`:TriggerHelp` 打开 snacks picker 浏览文档（用户 md 文件 + 内置 `:h` tag），或 `:TriggerHelp <名称>` 直接打开。面板为底部（或顶部）横向分屏，高度 40%（可配），不抢焦点。
 
-零依赖、单文件（`lua/trigger_help/init.lua`）、`setup()` 全参数可配。
+零依赖（picker 需要 snacks.nvim）、单文件（`lua/trigger_help/init.lua`）、`setup()` 全参数可配。
 
 ## 安装
 
@@ -12,50 +12,42 @@
 vim.cmd('packadd trigger-help.nvim')
 require('trigger_help').setup({
   content = {
-    ['/'] = '~/.config/nvim/docs/trigger-help.nvim/search.md', -- md 文件路径
-    ['?'] = { help = 'search' },                 -- 内置 :h 文档形态
-    [':'] = '~/.config/nvim/docs/trigger-help.nvim/cmd.md',
+    search  = '~/.config/nvim/docs/trigger-help.nvim/search.md',
+    reverse = '~/.config/nvim/docs/trigger-help.nvim/reverse.md',
+    cmd     = '~/.config/nvim/docs/trigger-help.nvim/cmd.md',
   },
-  trigger = 'CmdlineEnter',     -- string 或 { event = 'BufEnter', pattern = '*.lua' }
-  close = 'CmdlineLeave',       -- string 或 array（多个关闭事件）
-  -- match = function() return vim.fn.getcmdtype() end,  -- 返回 content 键；nil/'' 不显示
-  width = 25,                   -- 侧边面板宽度（窗口列数的百分比）
-  side = 'right',               -- 'left' | 'right'
+  height = 40,        -- 面板高度（窗口高度百分比）
+  position = 'bottom', -- 'bottom' | 'top'
 })
 ```
+
+## 命令
+
+| 命令 | 行为 |
+|------|------|
+| `:TriggerHelp` | 面板已开 → 关闭（toggle）；未开 → 打开 snacks picker 选择文档 |
+| `:TriggerHelp <名称>` | 直接打开指定文档（跳过 selector） |
+
+名称解析顺序：**content 键 → md 文件名 → help tag**；都不中 → `vim.notify` WARN 提示，不崩溃。
 
 ## 配置项
 
 | 项 | 默认 | 说明 |
 |----|------|------|
-| `content` | `{}` | 内容表：键 → md 文件路径（string）或 `{ help = '<tag>' }`。空表 = 零行为（不注册任何 autocmd） |
-| `trigger` | `'CmdlineEnter'` | 触发事件。string，或 `{ event = ..., pattern = ... }`（如 `{ event = 'BufEnter', pattern = '*.lua' }`） |
-| `close` | `'CmdlineLeave'` | 关闭事件。string 或数组（任一事件触发即幂等关闭） |
-| `match` | 见下 | 触发后调用，返回 content 键；返回 `nil`/`''` 不显示。默认：trigger 含 `CmdlineEnter` 时自动用 `v:event.cmdtype`（回退 `vim.fn.getcmdtype()`），其他事件无默认（不显示） |
-| `width` | `25` | 侧边面板宽度，窗口列数的百分比 |
-| `side` | `'right'` | 侧边方向：`'left'` 或 `'right'` |
+| `content` | `{}` | 文档表：**键 = 文档名**（selector 显示名）→ md 文件路径（string） |
+| `height` | `40` | 面板高度，窗口高度的百分比 |
+| `position` | `'bottom'` | 面板位置：`'bottom'` 或 `'top'` |
 
 ## 行为
 
-- **侧边面板**：内容渲染到右侧（或 `side='left'`）垂直分屏 buffer，宽度 25%（可配）。不抢占焦点；是普通窗口，鼠标滚轮可直接滚动。
+- **selector**：`snacks.pick` 列出两类条目——用户 content 文档（`[md] <name>` 前缀）与内置 help tag（`[help] <tag>` 前缀，`getcompletion` 前缀遍历懒扫描，会话内只扫一次、内存缓存）。选中 → 面板打开对应文档。
+- **面板**：底部（或 `position='top'` 顶部）横向分屏普通 buffer，高度 = 窗口高度 × `height%`。打开不抢焦点（`enter=false`）；普通窗口，鼠标滚轮/滚动天然支持。`q`（buffer 级 keymap）关闭面板并删除自建 buffer。
 - **md 渲染极简**：行首 `#`/`##` 整行用 `Title` 高亮；行首 `-` 替换为 2 空格缩进；其余原样（不解析行内 md）。
-- **`:h` 形态**：静默执行 `:help <tag>` → 读取该 tag 所在小节内容 → 关闭 help 窗口 → 渲染到侧边面板（保留 `filetype='help'` 获得内置高亮）。
+- **`:h` 形态**：静默执行 `:help <tag>`（pcall）→ 读取该 tag 所在小节内容 → 渲染到面板（保留 `filetype='help'` 获得内置高亮）→ 只关闭**本调用新增**的 help 窗口（复用用户已有 help 窗口时不动它），并删除新增窗口的 buffer。
 - md 文件缺失 → `vim.notify` WARN **一次**（每个路径每会话一次），不显示不崩溃。
-- `match()` 返回的键不在 `content` 中 → 静默不显示。
-- 同一时刻只保留一个侧边面板（新内容覆盖旧的）；关闭幂等（重复触发关闭事件不报错）。
-- `setup()` 幂等：重复调用不重复注册 autocmd（`vim.g.trigger_help_loaded` 守卫，与 workmark.nvim 同模式）。
-
-## 示例：BufEnter 触发（进入 lua 文件显示）
-
-```lua
-require('trigger_help').setup({
-  content = { [':'] = '~/.config/nvim/docs/trigger-help.nvim/lua-notes.md' },
-  trigger = { event = 'BufEnter', pattern = '*.lua' },
-  close = { 'BufLeave', 'FocusLost' },
-  match = function() return ':' end,
-  side = 'left',
-})
-```
+- 同一时刻只保留一个面板（新内容覆盖旧的）；关闭幂等。
+- `setup()` 幂等：`vim.g.trigger_help_loaded` 守卫，重复调用不重复注册命令（opt 插件双 source 场景）。
+- **不内置 keymap**：用户自行绑定，如 `<leader>xh` → `:TriggerHelp<CR>`。
 
 ## md 内容示例
 
