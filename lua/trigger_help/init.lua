@@ -220,8 +220,8 @@ local function render(lines, ft, titles)
 end
 
 -- Trigger callback: match() -> content key -> load -> float.
-function M.show()
-  local key = cfg.match()
+function M.show(args)
+  local key = cfg.match(args)
   if key == nil or key == '' then return end
   local entry = cfg.content[key]
   if entry == nil then return end -- key not in content: silent
@@ -240,8 +240,12 @@ function M.setup(opts)
   local trigger = normalize_trigger(cfg.trigger)
   local close_events = normalize_close(cfg.close)
   if cfg.match == nil then
-    cfg.match = has_cmdline_trigger(trigger.event) and function()
-      return vim.fn.getcmdtype()
+    cfg.match = has_cmdline_trigger(trigger.event) and function(args)
+      -- v:event.cmdtype is set by CmdlineEnter (more reliable than
+      -- getcmdtype() at callback time); fall back for other events.
+      local ct = args and vim.v.event and vim.v.event.cmdtype
+      if ct == nil or ct == '' then ct = vim.fn.getcmdtype() end
+      return ct
     end or nil
   end
 
@@ -250,7 +254,9 @@ function M.setup(opts)
   vim.api.nvim_create_autocmd(trigger.event, {
     group = group,
     pattern = trigger.pattern,
-    callback = M.show,
+    callback = function(args)
+      M.show(args)
+    end,
   })
   if #close_events > 0 then
     vim.api.nvim_create_autocmd(close_events, {
