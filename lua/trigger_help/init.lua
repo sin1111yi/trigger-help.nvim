@@ -86,10 +86,22 @@ function M.register_doc(spec)
   end
   local kind, value
   if spec.text ~= nil then
+    if type(spec.text) ~= 'table' then
+      vim.notify('[trigger-help] register_doc: text must be a list of lines for id "' .. spec.id .. '"', vim.log.levels.WARN)
+      return M
+    end
     kind, value = 'text', spec.text
   elseif spec.file ~= nil then
+    if type(spec.file) ~= 'string' then
+      vim.notify('[trigger-help] register_doc: file must be a path string for id "' .. spec.id .. '"', vim.log.levels.WARN)
+      return M
+    end
     kind, value = 'file', spec.file
   elseif spec.fn ~= nil then
+    if type(spec.fn) ~= 'function' then
+      vim.notify('[trigger-help] register_doc: fn must be a function for id "' .. spec.id .. '"', vim.log.levels.WARN)
+      return M
+    end
     kind, value = 'fn', spec.fn
   else
     vim.notify('[trigger-help] register_doc: no content (text/file/fn) for id "' .. spec.id .. '"', vim.log.levels.WARN)
