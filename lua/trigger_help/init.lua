@@ -1,26 +1,27 @@
 -- lua/trigger_help/init.lua — trigger-help.nvim
--- Event-triggered help floating window.
--- Content comes from markdown files or built-in :h tags; trigger/close
--- events and window style are fully configurable.
--- Empty content table = zero behavior (no autocmds registered).
+-- Command-triggered help panel.
+--   :TriggerHelp            toggle: close the open panel, or open the
+--                           snacks picker to browse docs
+--   :TriggerHelp <name>     open that doc directly (skip the picker)
+-- Name resolution (in order): content key > md filename > help tag.
+-- Content comes from markdown files or built-in :h tags; the plugin
+-- ships no content of its own.
 
 local M = {}
 
 local defaults = {
-  content = {},      -- key -> md file path (string) or { help = '<tag>' }
-  trigger = 'CmdlineEnter', -- string or { event = ..., pattern = ... }
-  close = 'CmdlineLeave',   -- string or array of events
-  match = nil,       -- function() -> content key; nil/'' = no display
-  width = 25,        -- side panel width, percent of window columns
-  side = 'right',    -- 'left' | 'right'
+  content = {},        -- name -> md file path (string)
+  height = 40,         -- panel height, percent of window height
+  position = 'bottom', -- 'bottom' | 'top'
 }
 
 local cfg = {}
 local state = { win = nil, buf = nil, warned = {} }
+local help_cache = nil -- lazy help-tag scan cache; nil until first use
 
 local ns = vim.api.nvim_create_namespace('trigger_help')
 
--- Close the side panel and delete its buffer (W2: no accumulation).
+-- Close the panel and delete its buffer (W2: no accumulation).
 -- Idempotent: no window -> no-op.
 function M.close()
   if state.win and vim.api.nvim_win_is_valid(state.win) then
@@ -33,32 +34,9 @@ function M.close()
   state.buf = nil
 end
 
-local function normalize_trigger(t)
-  if type(t) == 'string' then return { event = t } end
-  if type(t) == 'table' then return t end
-  return { event = defaults.trigger }
-end
-
-local function normalize_close(c)
-  if type(c) == 'string' then return { c } end
-  if type(c) == 'table' then return c end
-  return {}
-end
-
-local function has_cmdline_trigger(ev)
-  if type(ev) == 'string' then
-    return ev:find('CmdlineEnter', 1, true) ~= nil
-  end
-  if type(ev) == 'table' then
-    for _, e in ipairs(ev) do
-      if tostring(e):find('CmdlineEnter', 1, true) then return true end
-    end
-  end
-  return false
-end
-
 -- Load an md file: `#`/`##` heading lines get Title highlight,
 -- lines starting with `-` are indented 2 spaces, everything else as-is.
+-- Missing file -> WARN once per path (state.warned), returns nil.
 local function load_md(path)
   local full = vim.fn.expand(path)
   if vim.fn.filereadable(full) ~= 1 then
@@ -85,13 +63,11 @@ local function load_md(path)
 end
 
 -- Load a built-in help tag: silent :help <tag>, read the section around
--- the tag line, close the help window, render into the float with
--- filetype='help' for syntax highlighting.
+-- the tag line, close the help window, return lines + 'help' filetype.
+-- W1: only windows this call opened (set difference) are closed; a reused
+-- user help window is left untouched. W2: opened windows' buffers deleted.
 local function load_help(tag)
   local prev_win = vim.api.nvim_get_current_win()
-  -- :help reuses an existing help window instead of opening a new one, so
-  -- "current window changed" is NOT proof we opened a window. Record the
-  -- window set before; only windows in the set difference are plugin-owned.
   local before = {}
   for _, w in ipairs(vim.api.nvim_list_wins()) do before[w] = true end
   pcall(vim.cmd, 'silent! help ' .. vim.fn.fnameescape(tag))
@@ -132,101 +108,180 @@ local function load_help(tag)
   return out, 'help'
 end
 
-local function load_content(entry)
-  if type(entry) == 'string' then return load_md(entry) end
-  if type(entry) == 'table' and type(entry.help) == 'string' then
-    return load_help(entry.help)
+-- Lazy scan of built-in help tags; cached for the session (module var,
+-- scanned at most once). Note: getcompletion('', 'help') only returns the
+-- help-related subset (empty-pattern quirk in Vim), so iterate prefixes
+-- (a-z, digits, leading punctuation) to cover all tags.
+local function help_tags()
+  if help_cache == nil then
+    local seen, out = {}, {}
+    local prefixes = { '0','1','2','3','4','5','6','7','8','9',
+      'a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p','q','r','s','t','u','v','w','x','y','z',
+      "'", '-', ':', '[', ']', '!', '@', '#', '*', '_', '<', '>', '~' }
+    for _, p in ipairs(prefixes) do
+      local ok, tags = pcall(vim.fn.getcompletion, p, 'help')
+      if ok and type(tags) == 'table' then
+        for _, t in ipairs(tags) do
+          if not seen[t] then
+            seen[t] = true
+            out[#out + 1] = t
+          end
+        end
+      end
+    end
+    help_cache = out
+  end
+  return help_cache
+end
+
+-- Resolve a name to a doc entry: content key > md filename > help tag.
+-- Returns { kind = 'md', path = ..., name = ... } or
+--         { kind = 'help', tag = ... } or nil.
+local function resolve(name)
+  if name == nil or name == '' then return nil end
+  if cfg.content[name] ~= nil then
+    return { kind = 'md', path = cfg.content[name], name = name }
+  end
+  for key, path in pairs(cfg.content) do
+    local base = vim.fn.fnamemodify(vim.fn.expand(path), ':t:r')
+    if base == name then return { kind = 'md', path = path, name = key } end
+  end
+  for _, tag in ipairs(help_tags()) do
+    if tag == name then return { kind = 'help', tag = tag } end
   end
   return nil
 end
 
+-- Render lines into the bottom/top split panel (not focused). Regular
+-- window -> mouse wheel / scrolling work natively. `q` closes the panel.
 local function render(lines, ft, titles)
   M.close()
-  local width = math.max(10, math.floor(vim.o.columns * cfg.width / 100))
   local buf = vim.api.nvim_create_buf(false, true)
-  -- interaction hint on top: while in cmdline, mouse belongs to the cmdline;
-  -- <C-c> leaves it, then the panel scrolls/clicks like a normal window
-  local hint = '  [<C-c> 退出命令模式后可滚动/点击]'
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { hint })
-  vim.api.nvim_buf_set_lines(buf, 1, -1, false, lines)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   if ft then vim.bo[buf].filetype = ft end
-  vim.api.nvim_buf_set_extmark(buf, ns, 0, 0, { hl_group = 'Comment', end_col = #hint })
   for _, ln in ipairs(titles or {}) do
-    vim.api.nvim_buf_set_extmark(buf, ns, ln + 1, 0, {
+    vim.api.nvim_buf_set_extmark(buf, ns, ln, 0, {
       hl_group = 'Title',
       end_col = #lines[ln + 1],
     })
   end
   vim.bo[buf].modifiable = false
-  state.buf = buf -- W2: track the scratch buffer so M.close can delete it
-  -- Side panel: vertical split on the configured side, not focused.
-  -- It is a regular window, so mouse-wheel scrolling works natively
-  -- once the user leaves the cmdline with <C-c>.
+  -- buffer-level q: close window + delete buffer (W2)
+  vim.keymap.set('n', 'q', function()
+    M.close()
+  end, { buffer = buf, silent = true, nowait = true })
+  state.buf = buf
+  local height = math.max(3, math.floor(vim.o.lines * cfg.height / 100))
   state.win = vim.api.nvim_open_win(buf, false, {
-    split = cfg.side == 'left' and 'left' or 'right',
-    width = width,
+    split = cfg.position == 'top' and 'above' or 'below',
+    height = height,
   })
 end
 
--- Trigger callback: match() -> content key -> load -> float.
-function M.show(args)
-  local key = cfg.match and cfg.match(args)
-  if key == nil or key == '' then return end
-  M._show_key(key)
+-- Open the panel for a resolved doc entry.
+local function open(entry)
+  if entry.kind == 'md' then
+    local lines, ft, titles = load_md(entry.path)
+    if not lines then return end
+    render(lines, ft, titles)
+  else
+    local lines, ft = load_help(entry.tag)
+    if not lines then
+      vim.notify('[trigger-help] help tag not found: ' .. entry.tag, vim.log.levels.WARN)
+      return
+    end
+    render(lines, ft)
+  end
 end
 
--- Show the panel for a specific content key (used by the per-key autocmds).
-function M._show_key(key)
-  local entry = cfg.content[key]
-  if entry == nil then return end -- key not in content: silent
-  local lines, ft, titles = load_content(entry)
-  if not lines then return end
-  render(lines, ft, titles)
+-- Selector items: user content docs ([md] <name>) + built-in help tags
+-- ([help] <tag>). Exposed for tests; also used by the picker.
+function M.picker_items()
+  local items = {}
+  for name, path in pairs(cfg.content) do
+    items[#items + 1] = {
+      kind = 'md',
+      name = name,
+      path = path,
+      text = '[md] ' .. name,
+    }
+  end
+  for _, tag in ipairs(help_tags()) do
+    items[#items + 1] = { kind = 'help', tag = tag, text = '[help] ' .. tag }
+  end
+  table.sort(items, function(a, b) return a.text < b.text end)
+  return items
+end
+
+-- Open the snacks picker over the doc list.
+local function open_picker()
+  -- snacks.picker 内部引用全局 Snacks；先 require('snacks') 建立它，
+  -- 避免依赖用户环境的加载顺序（workmark 能跑是因为 snacks 已被其他插件加载）。
+  local ok_snacks = pcall(require, 'snacks')
+  if not ok_snacks then
+    vim.notify('[trigger-help] snacks.nvim required for picker', vim.log.levels.WARN)
+    return
+  end
+  local ok, snacks = pcall(require, 'snacks.picker')
+  if not ok then
+    vim.notify('[trigger-help] snacks.nvim required for picker', vim.log.levels.WARN)
+    return
+  end
+  local items = M.picker_items()
+  snacks.pick({
+    title = 'Trigger help',
+    items = items,
+    format = function(item)
+      local hl = item.kind == 'md' and 'Special' or 'Comment'
+      return { { item.text, hl } }
+    end,
+    preview = function(ctx)
+      local item = ctx.item
+      if item.kind == 'md' then
+        ctx.preview:set_title(item.name)
+        ctx.preview:set_lines(load_md(item.path) or { '(file not found)' })
+      else
+        ctx.preview:set_title('help: ' .. item.tag)
+        ctx.preview:set_lines({ 'Built-in help tag: ' .. item.tag, '', 'Press <CR> to open.' })
+      end
+      return true
+    end,
+    confirm = function(picker, item)
+      picker:close()
+      open(item)
+    end,
+  })
+end
+
+-- :TriggerHelp [name]
+--   no args: panel open -> close (toggle); else open the picker.
+--   name:    resolve (content key > md filename > help tag) and open.
+local function trigger_help(name)
+  if name == nil or name == '' then
+    if state.win and vim.api.nvim_win_is_valid(state.win) then
+      M.close()
+      return
+    end
+    open_picker()
+    return
+  end
+  local entry = resolve(name)
+  if entry == nil then
+    vim.notify('[trigger-help] no doc named "' .. name .. '"', vim.log.levels.WARN)
+    return
+  end
+  open(entry)
 end
 
 function M.setup(opts)
   -- Idempotency guard: a second setup (double source of the config file,
-  -- repeated require) must not register autocmds again.
+  -- repeated require) must not register the user command again.
   if vim.g.trigger_help_loaded then return M end
   cfg = vim.tbl_extend('keep', opts or {}, defaults)
-  if next(cfg.content) == nil then return M end -- zero behavior
-
-  local trigger = normalize_trigger(cfg.trigger)
-  local close_events = normalize_close(cfg.close)
-  if cfg.match == nil then
-    cfg.match = function()
-      return vim.fn.getcmdtype()
-    end
-  end
-
   vim.g.trigger_help_loaded = true
-  local group = vim.api.nvim_create_augroup('TriggerHelp', { clear = true })
-  -- Single CmdlineEnter autocmd. getcmdtype() is NOT reliable at callback
-  -- time (may still be empty); defer 1ms so the cmdline is fully entered,
-  -- then match() sees the real cmdtype ('/' '?' ':').
-  vim.api.nvim_create_autocmd(trigger.event, {
-    group = group,
-    pattern = trigger.pattern,
-    callback = function(args)
-      vim.defer_fn(function()
-        M.show(args)
-      end, 1)
-    end,
-  })
-  if #close_events > 0 then
-    vim.api.nvim_create_autocmd(close_events, {
-      group = group,
-      callback = function(args)
-        -- <C-c> aborting the cmdline also fires CmdlineLeave; keep the panel
-        -- open so the user can scroll/click it. Only close on a real command
-        -- execution (Enter) or any other close event.
-        if args.event == 'CmdlineLeave' and vim.v.event and vim.v.event.abort == 1 then
-          return
-        end
-        M.close()
-      end,
-    })
-  end
+  vim.api.nvim_create_user_command('TriggerHelp', function(args)
+    trigger_help(args.fargs[1])
+  end, { nargs = '?', desc = 'Toggle trigger-help panel, or open the picker' })
   return M
 end
 
