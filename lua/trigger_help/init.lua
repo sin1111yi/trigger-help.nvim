@@ -111,12 +111,17 @@ end
 -- Lazy scan of built-in help tags; cached for the session (module var,
 -- scanned at most once). Note: getcompletion('', 'help') only returns the
 -- help-related subset (empty-pattern quirk in Vim), so iterate prefixes
--- (a-z, digits, leading punctuation) to cover all tags.
+-- (a-z/A-Z, digits, leading punctuation) to cover all tags. Uppercase A-Z
+-- prefixes are required: real tags include E128, VimL function tags, etc.
+-- and getcompletion prefix-matches case-sensitively, so lowercase-only
+-- prefixes would miss them (dedup merges both spellings, e.g. 'e' and 'E'
+-- sets overlap).
 local function help_tags()
   if help_cache == nil then
     local seen, out = {}, {}
     local prefixes = { '0','1','2','3','4','5','6','7','8','9',
       'a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p','q','r','s','t','u','v','w','x','y','z',
+      'A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z',
       "'", '-', ':', '[', ']', '!', '@', '#', '*', '_', '<', '>', '~' }
     for _, p in ipairs(prefixes) do
       local ok, tags = pcall(vim.fn.getcompletion, p, 'help')
