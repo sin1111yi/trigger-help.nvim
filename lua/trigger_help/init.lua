@@ -151,8 +151,11 @@ local function resolve(name)
     local base = vim.fn.fnamemodify(vim.fn.expand(path), ':t:r')
     if base == name then return { kind = 'md', path = path, name = key } end
   end
-  for _, tag in ipairs(help_tags()) do
-    if tag == name then return { kind = 'help', tag = tag } end
+  -- help tag: exact query bypasses the 300-per-prefix cache cap, so
+  -- :TriggerHelp E900 works even though E900 is not in the picker list
+  local exact = vim.fn.getcompletion(name, 'help')
+  if #exact > 0 and vim.tbl_contains(exact, name) then
+    return { kind = 'help', tag = name }
   end
   return nil
 end
