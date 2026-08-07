@@ -42,7 +42,7 @@ require('trigger_help').setup({
 - **`:h` 形态**：静默执行 `:help <tag>` → 读取该 tag 所在小节内容 → 关闭 help 窗口 → 渲染到侧边面板（保留 `filetype='help'` 获得内置高亮）。
 - md 文件缺失 → `vim.notify` WARN **一次**（每个路径每会话一次），不显示不崩溃。
 - `match()` 返回的键不在 `content` 中 → 静默不显示。
-- 同一时刻只保留一个浮动窗口（新内容覆盖旧的）；关闭幂等（重复触发关闭事件不报错）。
+- 同一时刻只保留一个侧边面板（新内容覆盖旧的）；关闭幂等（重复触发关闭事件不报错）。
 - `setup()` 幂等：重复调用不重复注册 autocmd（`vim.g.trigger_help_loaded` 守卫，与 workmark.nvim 同模式）。
 
 ## 示例：BufEnter 触发（进入 lua 文件显示）
