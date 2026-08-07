@@ -55,10 +55,4 @@ help 窗口 → 渲染到侧边面板，保留 filetype='help' 获得内置高�
   （opt 插件双 source 场景）。
 
 ==============================================================================
-POSITIONS                                           *trigger-help-pos*
-
-top-right / top-left / bottom-right / bottom-left / center
-基于编辑器区域（relative='editor'），margin 控制与边缘间距。
-
-==============================================================================
  vim:tw=78:ts=8:noet:ft=help:norl:
