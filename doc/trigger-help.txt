@@ -15,18 +15,15 @@ SETUP                                              *trigger-help-setup*
     vim.cmd('packadd trigger-help.nvim')
     require('trigger_help').setup({
       content = {
-        ['/'] = '~/.config/nvim/keyhelp/search.md',   " md 文件路径
+        ['/'] = '~/.config/nvim/docs/trigger-help.nvim/search.md', " md 文件路径
         ['?'] = { help = 'search' },                  " 内置 :h 文档形态
-        [':'] = '~/.config/nvim/keyhelp/cmd.md',
+        [':'] = '~/.config/nvim/docs/trigger-help.nvim/cmd.md',
       },
       trigger = 'CmdlineEnter',    " 或 { event='BufEnter', pattern='*.lua' }
       close = 'CmdlineLeave',      " 或数组（多个关闭事件）
       match = function() return vim.fn.getcmdtype() end,  " 返回 content 键
-      width = 44,
-      pos = 'top-right',           " top-right|top-left|bottom-right|bottom-left|center
-      border = 'rounded',
-      zindex = 50,
-      margin = 1,
+      width = 25,                  " 侧边面板宽度（窗口列数百分比）
+      side = 'right',              " 'left' | 'right'
     })
 
 配置项：~
@@ -36,13 +33,10 @@ content  内容表：键 → md 文件路径（string）或 { help = '<tag>' }�
 trigger  触发事件。string 或 { event = ..., pattern = ... }。
 close    关闭事件。string 或数组，任一触发即幂等关闭。
 match    触发后调用，返回 content 键；nil/'' 不显示。
-         默认：trigger 含 CmdlineEnter 时自动用 getcmdtype()，
-         其他事件无默认（不显示）。
-width    浮动窗口宽度，全局统一。
-pos      位置枚举（见 *trigger-help-pos*）。
-border   边框（'rounded' 等）。
-zindex   窗口层级，默认 50，高于普通浮动窗口。
-margin   窗口与屏幕边缘间距，默认 1。
+         默认：trigger 含 CmdlineEnter 时自动用 v:event.cmdtype
+         （回退 getcmdtype()），其他事件无默认（不显示）。
+width    侧边面板宽度，窗口列数的百分比，默认 25。
+side     侧边方向：'left' 或 'right'，默认 'right'。
 
 ==============================================================================
 BEHAVIOR                                            *trigger-help-behavior*
@@ -51,7 +45,7 @@ md 渲染（极简）：行首 #/## 整行 Title 高亮；行首 - 替换为 2 �
 其余原样，不解析行内 md。
 
 :h 形态：静默执行 :help <tag>（pcall 包裹）→ 读取该 tag 所在小节 → 关闭
-help 窗口 → 渲染到浮动窗口，保留 filetype='help' 获得内置高亮。
+help 窗口 → 渲染到侧边面板，保留 filetype='help' 获得内置高亮。
 
 异常路径：
 - md 文件缺失：vim.notify WARN 一次（每路径每会话），不显示不崩溃。

@@ -11,22 +11,17 @@ local defaults = {
   trigger = 'CmdlineEnter', -- string or { event = ..., pattern = ... }
   close = 'CmdlineLeave',   -- string or array of events
   match = nil,       -- function() -> content key; nil/'' = no display
-  width = 44,
-  pos = 'top-right', -- top-right|top-left|bottom-right|bottom-left|center
-  border = 'rounded',
-  zindex = 50,
-  margin = 1,
+  width = 25,        -- side panel width, percent of window columns
+  side = 'right',    -- 'left' | 'right'
 }
 
 local cfg = {}
 local state = { win = nil, buf = nil, warned = {} }
 
-local remove_scroll -- forward-declared; defined below with install_scroll
-
 local ns = vim.api.nvim_create_namespace('trigger_help')
 
--- Close the float if open and delete its scratch buffer (W2: buffers must
--- not accumulate across a long session). Idempotent: no window -> no-op.
+-- Close the side panel and delete its buffer (W2: no accumulation).
+-- Idempotent: no window -> no-op.
 function M.close()
   if state.win and vim.api.nvim_win_is_valid(state.win) then
     pcall(vim.api.nvim_win_close, state.win, true)
@@ -36,40 +31,6 @@ function M.close()
   end
   state.win = nil
   state.buf = nil
-  remove_scroll()
-end
-
--- Mouse-wheel scrolling for the help float. The float is not focused while
--- the user types in the cmdline, so buffer-local keymaps do not fire; we
--- intercept the wheel keys globally while the float is visible and move the
--- float's cursor (which scrolls its content).
-local scroll_cb = nil
-
-remove_scroll = function()
-  if scroll_cb then
-    -- vim.on_key returns a namespace id (number); pass nil to clear it
-    pcall(vim.on_key, nil, scroll_cb)
-    scroll_cb = nil
-  end
-end
-
-local function install_scroll()
-  if scroll_cb or not (state.win and vim.api.nvim_win_is_valid(state.win)) then
-    return
-  end
-  scroll_cb = vim.on_key(function(key)
-    if not (state.win and vim.api.nvim_win_is_valid(state.win)) then return end
-    if key:byte(1) ~= 128 then return end -- 0x80: special key prefix
-    local name = key:sub(2)
-    if name ~= 'kU' and name ~= 'kd' then return end -- wheel up/down
-    vim.api.nvim_win_call(state.win, function()
-      local cur = vim.api.nvim_win_get_cursor(0)
-      local total = vim.api.nvim_buf_line_count(0)
-      local delta = name == 'kU' and -3 or 3
-      local new = math.max(1, math.min(total, cur[1] + delta))
-      vim.api.nvim_win_set_cursor(0, { new, cur[2] })
-    end)
-  end)
 end
 
 local function normalize_trigger(t)
@@ -179,22 +140,9 @@ local function load_content(entry)
   return nil
 end
 
-local function win_pos(pos, width, height)
-  local cols, rows, m = vim.o.columns, vim.o.lines, cfg.margin
-  if pos == 'top-left' then return m, m end
-  if pos == 'bottom-right' then return rows - height - m, cols - width - m end
-  if pos == 'bottom-left' then return rows - height - m, m end
-  if pos == 'center' then
-    return math.floor((rows - height) / 2), math.floor((cols - width) / 2)
-  end
-  return m, cols - width - m -- top-right
-end
-
 local function render(lines, ft, titles)
   M.close()
-  local width = math.min(cfg.width, math.max(10, vim.o.columns - 2 * cfg.margin))
-  -- height: content lines, capped at half the window height
-  local height = math.min(#lines + 2, math.max(1, math.floor(vim.o.lines / 2)))
+  local width = math.max(10, math.floor(vim.o.columns * cfg.width / 100))
   local buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   if ft then vim.bo[buf].filetype = ft end
@@ -205,19 +153,13 @@ local function render(lines, ft, titles)
     })
   end
   vim.bo[buf].modifiable = false
-  local row, col = win_pos(cfg.pos, width, height)
   state.buf = buf -- W2: track the scratch buffer so M.close can delete it
+  -- Side panel: vertical split on the configured side, not focused.
+  -- It is a regular window, so mouse-wheel scrolling works natively.
   state.win = vim.api.nvim_open_win(buf, false, {
-    relative = 'editor',
+    split = cfg.side == 'left' and 'left' or 'right',
     width = width,
-    height = height,
-    row = row,
-    col = col,
-    style = 'minimal',
-    border = cfg.border,
-    zindex = cfg.zindex,
   })
-  install_scroll()
 end
 
 -- Trigger callback: match() -> content key -> load -> float.
