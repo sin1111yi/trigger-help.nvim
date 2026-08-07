@@ -170,8 +170,13 @@ end
 
 -- Trigger callback: match() -> content key -> load -> float.
 function M.show(args)
-  local key = cfg.match(args)
+  local key = cfg.match and cfg.match(args)
   if key == nil or key == '' then return end
+  M._show_key(key)
+end
+
+-- Show the panel for a specific content key (used by the per-key autocmds).
+function M._show_key(key)
   local entry = cfg.content[key]
   if entry == nil then return end -- key not in content: silent
   local lines, ft, titles = load_content(entry)
@@ -188,25 +193,23 @@ function M.setup(opts)
 
   local trigger = normalize_trigger(cfg.trigger)
   local close_events = normalize_close(cfg.close)
-  if cfg.match == nil then
-    cfg.match = has_cmdline_trigger(trigger.event) and function(args)
-      -- v:event.cmdtype is set by CmdlineEnter (more reliable than
-      -- getcmdtype() at callback time); fall back for other events.
-      local ct = args and vim.v.event and vim.v.event.cmdtype
-      if ct == nil or ct == '' then ct = vim.fn.getcmdtype() end
-      return ct
-    end or nil
-  end
 
   vim.g.trigger_help_loaded = true
   local group = vim.api.nvim_create_augroup('TriggerHelp', { clear = true })
-  vim.api.nvim_create_autocmd(trigger.event, {
-    group = group,
-    pattern = trigger.pattern,
-    callback = function(args)
-      M.show(args)
-    end,
-  })
+  -- One autocmd per content key: CmdlineEnter's pattern IS the cmdline char
+  -- (vim doc), so pattern = key matches exactly ('/' '?' ':') — far more
+  -- reliable than getcmdtype()/v:event.cmdtype at callback time.
+  -- Non-cmdline triggers (e.g. BufEnter) still need `match` to pick a key.
+  for key in pairs(cfg.content) do
+    vim.api.nvim_create_autocmd(trigger.event, {
+      group = group,
+      pattern = vim.pesc(key),
+      callback = function(args)
+        if cfg.match and cfg.match(args) ~= key then return end
+        M._show_key(key)
+      end,
+    })
+  end
   if #close_events > 0 then
     vim.api.nvim_create_autocmd(close_events, {
       group = group,
