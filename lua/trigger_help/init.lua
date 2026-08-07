@@ -174,14 +174,15 @@ local function render(lines, ft, titles)
     })
   end
   vim.bo[buf].modifiable = false
-  -- buffer-level q: close window + delete buffer (W2)
-  vim.keymap.set('n', 'q', function()
-    M.close()
-  end, { buffer = buf, silent = true, nowait = true })
+  -- No custom q/Esc bindings: the panel behaves like any normal buffer
+  -- (:q, <C-w>c, or re-running :TriggerHelp closes it). This keeps q
+  -- free for its ordinary meaning and matches the rest of the UI.
+  vim.bo[buf].bufhidden = 'wipe' -- closing the window (e.g. :q) wipes the
+  -- scratch buffer so it cannot accumulate across a session (W2)
   state.buf = buf
   local height = math.max(3, math.floor(vim.o.lines * cfg.height / 100))
-  -- Panel takes focus (cursor lands in it) so the user can scroll/q right
-  -- away; toggle or q returns focus control.
+  -- Panel takes focus (cursor lands in it) so the user can scroll right
+  -- away; :q / <C-w>c / toggle closes it.
   state.win = vim.api.nvim_open_win(buf, true, {
     split = cfg.position == 'top' and 'above' or 'below',
     height = height,
