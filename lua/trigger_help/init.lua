@@ -180,7 +180,9 @@ local function render(lines, ft, titles)
   end, { buffer = buf, silent = true, nowait = true })
   state.buf = buf
   local height = math.max(3, math.floor(vim.o.lines * cfg.height / 100))
-  state.win = vim.api.nvim_open_win(buf, false, {
+  -- Panel takes focus (cursor lands in it) so the user can scroll/q right
+  -- away; toggle or q returns focus control.
+  state.win = vim.api.nvim_open_win(buf, true, {
     split = cfg.position == 'top' and 'above' or 'below',
     height = height,
   })
