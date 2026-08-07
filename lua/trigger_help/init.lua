@@ -144,10 +144,15 @@ local function render(lines, ft, titles)
   M.close()
   local width = math.max(10, math.floor(vim.o.columns * cfg.width / 100))
   local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  -- interaction hint on top: while in cmdline, mouse belongs to the cmdline;
+  -- <C-c> leaves it, then the panel scrolls/clicks like a normal window
+  local hint = '  [<C-c> 退出命令模式后可滚动/点击]'
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { hint })
+  vim.api.nvim_buf_set_lines(buf, 1, -1, false, lines)
   if ft then vim.bo[buf].filetype = ft end
+  vim.api.nvim_buf_set_extmark(buf, ns, 0, 0, { hl_group = 'Comment', end_col = #hint })
   for _, ln in ipairs(titles or {}) do
-    vim.api.nvim_buf_set_extmark(buf, ns, ln, 0, {
+    vim.api.nvim_buf_set_extmark(buf, ns, ln + 1, 0, {
       hl_group = 'Title',
       end_col = #lines[ln + 1],
     })
@@ -155,7 +160,8 @@ local function render(lines, ft, titles)
   vim.bo[buf].modifiable = false
   state.buf = buf -- W2: track the scratch buffer so M.close can delete it
   -- Side panel: vertical split on the configured side, not focused.
-  -- It is a regular window, so mouse-wheel scrolling works natively.
+  -- It is a regular window, so mouse-wheel scrolling works natively
+  -- once the user leaves the cmdline with <C-c>.
   state.win = vim.api.nvim_open_win(buf, false, {
     split = cfg.side == 'left' and 'left' or 'right',
     width = width,
