@@ -210,7 +210,15 @@ function M.setup(opts)
   if #close_events > 0 then
     vim.api.nvim_create_autocmd(close_events, {
       group = group,
-      callback = M.close,
+      callback = function(args)
+        -- <C-c> aborting the cmdline also fires CmdlineLeave; keep the panel
+        -- open so the user can scroll/click it. Only close on a real command
+        -- execution (Enter) or any other close event.
+        if args.event == 'CmdlineLeave' and vim.v.event and vim.v.event.abort == 1 then
+          return
+        end
+        M.close()
+      end,
     })
   end
   return M
