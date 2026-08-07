@@ -23,6 +23,22 @@ local registered = {}   -- id -> doc spec (register_doc); same id overwrites
 
 local ns = vim.api.nvim_create_namespace('trigger_help')
 
+-- Locale: zh* -> Chinese (same rule as wokamark help: LC_ALL > LC_MESSAGES > LANG)
+local function is_zh()
+  local lang = (vim.env.LC_ALL or vim.env.LC_MESSAGES or vim.env.LANG or ''):lower()
+  return lang:match('^zh') ~= nil
+end
+
+-- Pick the language-appropriate value: { en = ..., zh = ... } tables are
+-- selected by locale; plain values (string / list / function) pass through.
+local function pick_lang(v)
+  if type(v) ~= 'table' then return v end
+  local zh = is_zh()
+  if zh and v.zh ~= nil then return v.zh end
+  if not zh and v.en ~= nil then return v.en end
+  return v.en or v.zh -- fallback to whichever language exists
+end
+
 -- Close the panel and delete its buffer (W2: no accumulation).
 -- Idempotent: no window -> no-op.
 function M.close()
@@ -80,7 +96,7 @@ function M.register_doc(spec)
     vim.notify('[trigger-help] register_doc: id (string) required', vim.log.levels.WARN)
     return M
   end
-  if type(spec.name) ~= 'string' or spec.name == '' then
+  if type(spec.name) ~= 'string' and (type(spec.name) ~= 'table' or (spec.name.en == nil and spec.name.zh == nil)) then
     vim.notify('[trigger-help] register_doc: name required for id "' .. spec.id .. '"', vim.log.levels.WARN)
     return M
   end
@@ -112,19 +128,22 @@ function M.register_doc(spec)
 end
 
 -- Resolve a registered doc to panel lines (+ft, +titles for md files).
+-- Values may be { en = ..., zh = ... } — pick by locale first.
 local function doc_lines(doc)
+  local value = pick_lang(doc.value)
+  local name = pick_lang(doc.name)
   if doc.kind == 'text' then
-    if type(doc.value) ~= 'table' then
-      vim.notify('[trigger-help] register_doc text must be a table for "' .. doc.name .. '"', vim.log.levels.WARN)
+    if type(value) ~= 'table' then
+      vim.notify('[trigger-help] register_doc text must be a table for "' .. name .. '"', vim.log.levels.WARN)
       return nil
     end
-    return doc.value
+    return value
   elseif doc.kind == 'file' then
-    return load_md(doc.value) -- missing file already WARNs once per path
+    return load_md(value) -- missing file already WARNs once per path
   else -- 'fn'
-    local ok, lines = pcall(doc.value)
+    local ok, lines = pcall(value)
     if not ok or type(lines) ~= 'table' then
-      vim.notify('[trigger-help] register_doc fn failed for "' .. doc.name .. '"', vim.log.levels.WARN)
+      vim.notify('[trigger-help] register_doc fn failed for "' .. name .. '"', vim.log.levels.WARN)
       return nil
     end
     return lines
@@ -217,11 +236,12 @@ local function resolve(name)
   if cfg.content[name] ~= nil then
     return { kind = 'md', path = cfg.content[name], name = name }
   end
-  -- registered docs: match name, then id (id lets :TriggerHelp wokamark
-  -- open a doc whose display name contains spaces, e.g. 'wokamark 使用')
+  -- registered docs: match displayed name (locale-picked), then id
+  -- (id lets :TriggerHelp wokamark open a doc whose display name has
+  -- spaces, e.g. 'wokamark 使用')
   for _, doc in pairs(registered) do
-    if doc.name == name or doc.id == name then
-      return { kind = 'doc', id = doc.id, name = doc.name }
+    if pick_lang(doc.name) == name or doc.id == name then
+      return { kind = 'doc', id = doc.id, name = pick_lang(doc.name) }
     end
   end
   for key, path in pairs(cfg.content) do
@@ -302,11 +322,12 @@ function M.picker_items()
     }
   end
   for _, doc in pairs(registered) do
+    local shown = pick_lang(doc.name)
     items[#items + 1] = {
       kind = 'doc',
       id = doc.id,
-      name = doc.name,
-      text = '[' .. doc.id .. '] ' .. doc.name,
+      name = shown,
+      text = '[' .. doc.id .. '] ' .. shown,
     }
   end
   for _, tag in ipairs(help_tags()) do
